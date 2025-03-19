@@ -39,5 +39,15 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"/>
 
+        <ImageView
+            android:id="@+id/authIcon"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_marginStart="8dp"
+            android:contentDescription="Authentication Icon"
+            android:visibility="gone"
+            app:srcCompat="@drawable/ic_pending" />
+
+
     </LinearLayout>
 </androidx.cardview.widget.CardView>

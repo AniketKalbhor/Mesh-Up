@@ -526,59 +526,43 @@ public class MainActivity extends AppCompatActivity {
         saveMessage(message);
         executorService.execute(() -> {
             try {
-                // Use local username or default
-                String senderName = TextUtils.isEmpty(localUsername)
-                        ? "User-" + DEVICE_ID.substring(0, 8)
-                        : localUsername;
-
-                // Get device MAC safely
-                String macAddress = "Unknown";
-                try {
-                    WifiManager wifiManager = (WifiManager) getApplicationContext()
-                            .getSystemService(Context.WIFI_SERVICE);
-                    if (wifiManager != null) {
-                        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
-                        macAddress = wifiInfo != null ? wifiInfo.getMacAddress() : "Unknown";
-                    }
-                } catch (Exception e) {
-                    Log.e("MainActivity", "Failed to get MAC address", e);
-                }
-
-                // Create message with safe values
+                String senderName = TextUtils.isEmpty(localUsername) ? "User-" + DEVICE_ID.substring(0, 8) : localUsername;
+                String macAddress = getDeviceMacAddress();
                 String messageId = UUID.randomUUID().toString();
                 String localIP = getLocalIpAddress();
+
+                // Generate TESLA authentication data
+                TeslaAuthManager.TeslaData teslaData = TeslaAuthManager.getInstance(this).getCurrentMac(message);
+
                 Message msgObj = new Message(
                         senderName,
                         macAddress,
                         localIP != null ? localIP : "Unknown",
                         message,
-                        messageId
+                        messageId,
+                        DEVICE_ID,
+                        teslaData.interval,
+                        teslaData.mac,
+                        teslaData.disclosedKey,
+                        teslaData.disclosureInterval
                 );
 
-                // Safely update UI on main thread
-                if (mainHandler != null) {
-                    mainHandler.post(() -> {
-                        if (messageAdapter != null) {
-                            messageAdapter.addMessage(msgObj);
-                        }
-                    });
-                }
+                mainHandler.post(() -> {
+                    if (messageAdapter != null) {
+                        messageAdapter.addMessage(msgObj);
+                    }
+                });
 
-                // Construct mesh message
-                String meshMessage = constructMeshMessage(messageId, message);
-                // Construct mesh message
+                // Prepare TESLA-encoded message for transmission
+                String meshMessage = constructMeshMessage(messageId, message, msgObj);
 
-                // Create UDP broadcast socket
                 DatagramSocket socket = new DatagramSocket();
                 socket.setBroadcast(true);
 
-                // Prepare message data
                 byte[] sendData = meshMessage.getBytes();
 
-                // Get network interface details
                 List<InetAddress> broadcastAddresses = getBroadcastAddresses();
 
-                // Send to all potential broadcast addresses
                 for (InetAddress broadcastAddress : broadcastAddresses) {
                     try {
                         DatagramPacket sendPacket = new DatagramPacket(
@@ -587,7 +571,6 @@ public class MainActivity extends AppCompatActivity {
                                 broadcastAddress,
                                 BROADCAST_PORT
                         );
-
                         socket.send(sendPacket);
                     } catch (IOException e) {
                         e.printStackTrace();
@@ -596,18 +579,11 @@ public class MainActivity extends AppCompatActivity {
 
                 socket.close();
 
-                // Start acknowledgment timeout
                 scheduleAcknowledgmentTimeout(messageId);
 
             } catch (SocketException e) {
                 Log.e("MainActivity", "Broadcast message failed", e);
-                // Safely show toast on main thread
-                if (mainHandler != null)
-                    mainHandler.post(() -> {
-                        Toast.makeText(MainActivity.this,
-                                "Failed to broadcast message",
-                                Toast.LENGTH_SHORT).show();
-                    });
+                mainHandler.post(() -> Toast.makeText(MainActivity.this, "Failed to broadcast message", Toast.LENGTH_SHORT).show());
             }
         });
     }
@@ -697,12 +673,40 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private String constructMeshMessage(String messageId, String message) {
-        // Format: messageId|originDeviceId|hopCount|senderUsername|message
-        return String.format("%s|%s|0|%s|%s",
+    private String byteArrayToHex(byte[] bytes) {
+        if (bytes == null) {
+            Log.e("MainActivity", "Null byte array encountered in byteArrayToHex.");
+            return "00"; // Return a default placeholder or handle this case appropriately
+        }
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+
+    private byte[] hexToByteArray(String hex) {
+        int len = hex.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(hex.charAt(i), 16) << 4)
+                    + Character.digit(hex.charAt(i + 1), 16));
+        }
+        return data;
+    }
+
+
+    private String constructMeshMessage(String messageId, String message, Message msgObj) {
+        return String.format("%s|%s|%d|%s|%s|%s|%s|%d|%s",
                 messageId,
-                DEVICE_ID,
-                localUsername,  // Include actual username
+                msgObj.getOriginDeviceId(),
+                msgObj.getAuthInterval(),
+                byteArrayToHex(msgObj.getAuthMac()),
+                byteArrayToHex(msgObj.getDisclosedKey()),
+                msgObj.getSenderName(),
+                msgObj.getIpAddress(),
+                msgObj.getDisclosureInterval(),
                 message
         );
     }
@@ -761,55 +765,46 @@ public class MainActivity extends AppCompatActivity {
 
     private void processReceivedMessage(String receivedMessage, String senderIP) {
         String[] parts = receivedMessage.split("\\|");
-        if (parts.length != 5) return;
+        if (parts.length != 9) return;
 
         String messageId = parts[0];
         String originDeviceId = parts[1];
-        int hopCount = Integer.parseInt(parts[2]);
-        String senderUsername = parts[3];
-        String message = parts[4];
+        int authInterval = Integer.parseInt(parts[2]);
+        byte[] authMac = hexToByteArray(parts[3]);
+        byte[] disclosedKey = hexToByteArray(parts[4]);
+        String senderName = parts[5];
+        String ipAddress = parts[6];
+        int disclosureInterval = Integer.parseInt(parts[7]);
+        String message = parts[8];
 
-        // Track connected device
-        connectedDevices.add(originDeviceId);
-        updateDeviceCount();
-
-        // Check if we've already seen this message
-        if (seenMessageIds.contains(messageId)) {
-            return; // Prevent duplicate processing
-        }
-
-        // Update last seen time for the device
-        deviceLastSeenTime.put(originDeviceId, System.currentTimeMillis());
-
-        // Add message to seen list
+        if (seenMessageIds.contains(messageId)) return;
         seenMessageIds.add(messageId);
 
-        // Check hop count to prevent infinite routing
-        if (hopCount >= MAX_HOP_COUNT) {
-            return;
-        }
+        boolean isAuthenticated = TeslaAuthManager.getInstance(this).processReceivedMessage(
+                originDeviceId, message, authInterval, authMac, disclosedKey, disclosureInterval
+        );
 
-        // If not from this device, process and potentially rebroadcast
-        if (!originDeviceId.equals(DEVICE_ID)) {
-            sendAcknowledgment(messageId, originDeviceId);
+        Message msgObj = new Message(
+                senderName,
+                "Unknown",
+                ipAddress,
+                message,
+                messageId,
+                originDeviceId,
+                authInterval,
+                authMac,
+                disclosedKey,
+                disclosureInterval
+        );
 
-            // Display received message on UI thread
-            mainHandler.post(() -> {
-                Message msgObj = new Message(
-                        senderUsername,  // Use actual sender username
-                        "Unknown",
-                        senderIP,
-                        message,
-                        messageId
-                );
-                msgObj.setDelivered(true);
-                messageAdapter.addMessage(msgObj);
-            });
+        msgObj.setDelivered(true);
+        msgObj.setAuthenticated(isAuthenticated);
 
-            // Enhanced routing: Rebroadcast with incremented hop count
-            rebroadcastMessage(messageId, originDeviceId, hopCount, senderUsername, message);
-        }
+        mainHandler.post(() -> {
+            messageAdapter.addMessage(msgObj);
+        });
     }
+
 
     private void rebroadcastMessage(String messageId, String originDeviceId, int hopCount, String senderUsername, String message) {
         executorService.execute(() -> {
