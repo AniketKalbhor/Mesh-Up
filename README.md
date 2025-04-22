@@ -142,5 +142,113 @@ Messages transmitted over the UDP protocol include the following structure:
 
 ---
 
-## 📞 Contact
-Feel free to contribute or report issues in the GitHub repository. Happy coding! 🌐
+# Emergency Network for Disaster Affected Areas
+
+## Overview
+
+This project implements a decentralized mesh network system designed to provide reliable communication in emergency situations where traditional infrastructure may be compromised or unavailable. Using a combination of ad hoc networking, AODV (Ad hoc On-Demand Distance Vector) routing, and flooding-based message propagation, the system enables devices to communicate without relying on central servers or existing networks.
+
+## Key Features
+
+- **Infrastructure-Independent Communication**: Functions without requiring cellular networks, Wi-Fi access points, or internet connectivity
+- **Self-Organizing Mesh Network**: Devices automatically discover each other and form a resilient network
+- **Multi-Platform Support**: Implementations for Android devices, desktop systems, and IoT devices (ESP32)
+- **Secure Messaging**: Implements TESLA broadcast authentication and hop count protection
+- **Emergency SOS Functionality**: Priority emergency alerts with location and device information
+- **Power Optimization**: Low-power operation to maximize battery life during emergencies
+- **Message Authentication**: Delayed verification using TESLA protocol ensures message integrity
+- **Hop Count Protection**: Prevents routing attacks through secure hash chains
+
+## Architecture
+
+The system uses a hybrid routing approach:
+
+1. **Flooding-based Routing**: Ensures message delivery by forwarding messages to all neighbors
+2. **AODV Routing**: Optimizes routes for efficiency where possible
+3. **Mesh Topology**: Every device acts as both a client and a router
+
+## Security Mechanisms
+
+### TESLA Authentication
+
+The system implements the TESLA (Timed Efficient Stream Loss-tolerant Authentication) protocol:
+
+- **Delayed Key Disclosure**: Keys are disclosed after a time delay
+- **One-Way Key Chain**: Hash chain of authentication keys
+- **MAC Verification**: Message Authentication Codes verify message integrity
+- **Asynchronous Authentication**: Messages can be transmitted immediately but verified later
+
+### Hop Count Protection
+
+To prevent routing attacks where malicious nodes decrease hop counts:
+
+- **Hash Chain**: Creates a chain where each hop can only increment properly
+- **One-way Verification**: Nodes can verify a message has taken the claimed number of hops
+- **Top Hash Anchor**: Secures the initial state of the hop count
+
+## Components and File Structure
+
+### Android Application
+
+- **MainActivity.java**: Main UI and network handling
+- **Message.java**: Data structure for network messages
+- **MessageAdapter.java**: UI adapter for displaying messages
+- **NetworkVisualizationView.java**: Visual representation of network topology
+- **NetworkStatusActivity.java**: Network management interface
+
+### Security Components
+
+- **TeslaKeyChain.java**: Implements TESLA authentication key chain
+- **TeslaAuthenticator.java**: Handles message authentication
+- **HopCountProtector.java**: Protects against hop count manipulation
+- **SecureMessageManager.java**: Manages message security operations
+- **SecureMessageLog.java**: Security event logging
+
+### Desktop Application
+
+- **MeshNetworkClient.java**: Java Swing UI for desktop mesh networking
+
+### IoT Implementation
+
+- **ESPCode.ino**: Implementation for ESP32/ESP8266 devices
+
+## How It Works
+
+1. **Network Formation**:
+   - Devices start in hybrid AP (Access Point) and Station mode
+   - Each device creates a local hotspot and scans for other devices
+   - Connections are established automatically between nearby devices
+
+2. **Message Routing**:
+   - Messages are broadcast to all directly connected neighbors
+   - Each node adds a sequence ID and maintains a history of seen messages
+   - Messages are rebroadcast with an incremented hop count up to a maximum limit
+
+3. **Security Flow**:
+   - Sender uses undisclosed TESLA key to generate MAC for message
+   - Message is sent immediately with the MAC and current hop count hash
+   - Receivers buffer the message until the key is disclosed
+   - Periodically, keys are disclosed and buffered messages are authenticated
+   - Hop count integrity is verified using the hash chain
+
+## Usage Scenarios
+
+- **Natural Disasters**: Maintain communication when cell towers and internet are down
+- **Remote Areas**: Create local networks in regions with poor infrastructure
+- **Emergency Response**: Coordinate rescue efforts with secure, reliable messaging
+- **Temporary Events**: Establish communication in crowded venues where networks are congested
+
+## Technical Requirements
+
+- Android 6.0+ for mobile application
+- Java 8+ for desktop application
+- ESP8266/ESP32 for IoT implementation
+- Wi-Fi capable devices
+
+## Future Improvements
+
+- Integration with satellite communication systems for extended reach
+- Implementation of mesh-based voice and video communication
+- Enhanced power management for longer operation
+- Integration with existing emergency services
+- MANET (Mobile Ad hoc Network) optimization techniques
