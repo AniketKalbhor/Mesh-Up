@@ -5,6 +5,12 @@
     <color name="error_background">#FFEBEE</color>
     <color name="text_primary">#000000</color>
     <color name="text_error">#D32F2F</color>
+    <!-- Add these to your colors.xml file -->
+    <color name="message_authenticated_bg">#E8F5E9</color> <!-- Light green -->
+    <color name="message_pending_bg">#FFF8E1</color> <!-- Light yellow -->
+    <color name="message_undelivered_bg">#FFEBEE</color> <!-- Light red -->
+    <color name="message_normal_bg">#FFFFFF</color> <!-- White -->
+    <color name="md_theme_warning">#FFC107</color> <!-- Amber warning color -->
 
     <color name="md_theme_primary">#415F91</color>
     <color name="md_theme_onPrimary">#FFFFFF</color>

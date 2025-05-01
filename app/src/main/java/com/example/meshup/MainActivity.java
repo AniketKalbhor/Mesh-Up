@@ -1,8 +1,15 @@
 package com.example.meshup;
+
 import android.Manifest;
 import com.example.meshup.R;
+import com.example.meshup.security.SecureMessageLog;
+import com.example.meshup.security.TeslaKeyChain;
+import com.example.meshup.security.TeslaAuthenticator;
+import com.example.meshup.security.HopCountProtector;
+import com.example.meshup.security.SecureMessageManager;
 
 import android.database.Cursor;
+import android.graphics.Color;
 import android.provider.ContactsContract;
 import android.content.ContentResolver;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
@@ -29,8 +36,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -42,6 +52,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.bottomsheet.BottomSheetDialog;
+import com.google.android.material.snackbar.Snackbar;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -56,25 +67,29 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
-
+    private static final String TAG = "MainActivity";
 
     private static final int PERMISSIONS_REQUEST_CODE = 1001;
     private static final int BROADCAST_PORT = 8888;
     private static final int MAX_HOP_COUNT = 5; // Prevent infinite routing
 
     private static final long ACKNOWLEDGMENT_TIMEOUT = 5000;
+    private static final int TESLA_KEY_DISCLOSURE_INTERVAL = 5000; // 5 seconds
 
     private static final int PICK_CONTACT_REQUEST = 1;
     private static final int MAX_EMERGENCY_CONTACTS = 2;
     private ArrayList<String> emergencyContacts;
-    private int currentContactPickerIndex = 0;; // 5 seconds
+    private int currentContactPickerIndex = 0;
     private Map<String, Long> deviceLastSeenTime = new ConcurrentHashMap<>();
     private static final long DEVICE_TIMEOUT = 60000; // 60 seconds
     private RecyclerView messageRecyclerView;
@@ -82,13 +97,15 @@ public class MainActivity extends AppCompatActivity {
     private TextView deviceCountText;
     private String userName;
     private String deviceMac;
+    private SecureMessageLog securityLog;
+
 
     private EditText messageInput;
-    //    private TextView messageView;
     private Button sendButton;
     private TextView statusText;
 
     private ExecutorService executorService;
+    private ScheduledExecutorService scheduledExecutor;
     private Handler mainHandler;
 
     private volatile boolean isReceiving = true;
@@ -105,10 +122,24 @@ public class MainActivity extends AppCompatActivity {
     private String localUsername = "Anonymous";
     private NetworkChangeReceiver networkChangeReceiver;
 
+    // Security components
+    private TeslaKeyChain teslaKeyChain;
+    private TeslaAuthenticator teslaAuth;
+    private HopCountProtector hopProtector;
+    private SecureMessageManager secureMessageManager;
+    private Map<String, Message> pendingVerification = new ConcurrentHashMap<>();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        // In onCreate method of MainActivity.java
+        Button securityButton = findViewById(R.id.securityButton);
+        securityButton.setOnClickListener(v -> showSecurityStatusDialog());
+
+        // Initialize security components
+        initializeSecurity();
 
         // Initialize emergency contacts
         emergencyContacts = new ArrayList<>();
@@ -123,6 +154,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Setup execution and UI handling
         executorService = Executors.newCachedThreadPool();
+        scheduledExecutor = Executors.newScheduledThreadPool(1);
         mainHandler = new Handler(Looper.getMainLooper());
 
         // Check and request necessary permissions
@@ -135,6 +167,9 @@ public class MainActivity extends AppCompatActivity {
         // Start background message receiver
         startMessageReceiver();
 
+        // Start key disclosure scheduler
+        scheduleKeyDisclosure();
+
         // Update connection status
         updateConnectionStatus();
 
@@ -143,6 +178,134 @@ public class MainActivity extends AppCompatActivity {
         networkChangeReceiver = new NetworkChangeReceiver();
         IntentFilter filter = new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION);
         registerReceiver(networkChangeReceiver, filter);
+    }
+
+    private void initializeSecurity() {
+        // Create TESLA key chain with 100 keys and 30-second disclosure interval
+        teslaKeyChain = new TeslaKeyChain(100, TESLA_KEY_DISCLOSURE_INTERVAL);
+        teslaAuth = new TeslaAuthenticator(teslaKeyChain);
+        hopProtector = new HopCountProtector();
+        secureMessageManager = new SecureMessageManager(teslaAuth, hopProtector);
+        securityLog = new SecureMessageLog(this);
+
+        // Log security initialization
+        securityLog.logKeyGeneration(100, TESLA_KEY_DISCLOSURE_INTERVAL);
+
+        Log.d(TAG, "Initialized security components");
+    }
+
+
+    // Update scheduleKeyDisclosure
+    private void scheduleKeyDisclosure() {
+        scheduledExecutor.scheduleAtFixedRate(() -> {
+            try {
+                // Get current key index
+                int keyIndex = teslaKeyChain.getCurrentIndex() + 1;
+                if (keyIndex >= teslaKeyChain.getCurrentIndex()) {
+                    // Get the key to disclose
+                    byte[] key = teslaKeyChain.getKeyByIndex(keyIndex);
+                    if (key != null) {
+                        // Create and send key disclosure message
+                        Message keyMessage = secureMessageManager.createKeyDisclosureMessage(
+                                DEVICE_ID, localUsername, keyIndex, key);
+
+                        broadcastSecureMessage(keyMessage);
+
+                        // Log key disclosure
+                        String keyPrefix = SecureMessageManager.byteArrayToHex(key).substring(0, 8);
+                        securityLog.logKeyDisclosure(keyIndex, keyPrefix);
+
+                        Log.d(TAG, "Disclosed TESLA key for index: " + keyIndex);
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error in key disclosure task", e);
+            }
+        }, TESLA_KEY_DISCLOSURE_INTERVAL, TESLA_KEY_DISCLOSURE_INTERVAL, TimeUnit.MILLISECONDS);
+    }
+
+    private void showSecurityStatusDialog() {
+        try {
+            // Create a simple AlertDialog if the custom layout isn't available
+            AlertDialog.Builder builder = new AlertDialog.Builder(this);
+
+            // Try to use the custom layout
+            View dialogView = null;
+            try {
+                dialogView = getLayoutInflater().inflate(R.layout.dialog_security_status, null);
+                builder.setView(dialogView);
+            } catch (Exception e) {
+                Log.e(TAG, "Could not inflate custom dialog layout", e);
+                // Fallback to a simple dialog if the layout isn't available
+                builder.setTitle("Security Status")
+                        .setMessage("TESLA Authentication active\n" +
+                                "Current Key Index: " + teslaKeyChain.getCurrentIndex() + "\n" +
+                                "Connected Devices: " + connectedDevices.size() + "\n" +
+                                "Pending Messages: " + pendingVerification.size() + "\n" +
+                                "Max Hop Count: " + MAX_HOP_COUNT)
+                        .setPositiveButton("OK", null);
+
+                AlertDialog alertDialog = builder.create();
+                alertDialog.show();
+                return;
+            }
+
+            // Set up the dialog components
+            TextView teslaInfoText = dialogView.findViewById(R.id.teslaInfoText);
+            TextView hopCountInfoText = dialogView.findViewById(R.id.hopCountInfoText);
+            TextView statsText = dialogView.findViewById(R.id.statsText);
+            ProgressBar teslaProgressBar = dialogView.findViewById(R.id.teslaProgressBar);
+
+            // Fill with security information
+            int currentKeyIndex = teslaKeyChain.getCurrentIndex();
+            int totalKeys = 100; // From your initialization
+            int keysUsed = totalKeys - currentKeyIndex;
+            int keysRemaining = currentKeyIndex;
+
+            // Set TESLA information
+            teslaInfoText.setText(String.format("TESLA Authentication Active\n" +
+                            "Current Key Index: %d\n" +
+                            "Keys Used: %d / %d\n" +
+                            "Disclosure Interval: %d seconds",
+                    currentKeyIndex, keysUsed, totalKeys,
+                    TESLA_KEY_DISCLOSURE_INTERVAL / 1000));
+
+            // Set progress bar
+            teslaProgressBar.setMax(totalKeys);
+            teslaProgressBar.setProgress(keysUsed);
+
+            // Set hop count information
+            hopCountInfoText.setText(String.format("Hop Count Protection Active\n" +
+                            "Maximum Hops: %d\n" +
+                            "Using SHA-256 Hash Chain",
+                    MAX_HOP_COUNT));
+
+            // Set network statistics
+            statsText.setText(String.format("Connected Devices: %d\n" +
+                            "Messages Pending Authentication: %d\n" +
+                            "Secure Messages Sent: %d",
+                    connectedDevices.size(),
+                    pendingVerification.size(),
+                    securityLog.getMessageCount()));
+
+            // Show the log file path
+            Button viewLogButton = dialogView.findViewById(R.id.viewLogButton);
+            viewLogButton.setOnClickListener(v -> {
+                Toast.makeText(this, "Security log: " + securityLog.getLogFile().getAbsolutePath(),
+                        Toast.LENGTH_LONG).show();
+            });
+
+            // Create and show dialog
+            AlertDialog alertDialog = builder.create();
+            alertDialog.setTitle("Security Status");
+            alertDialog.show();
+
+        } catch (Exception e) {
+            // Ultimate fallback if anything goes wrong
+            Log.e(TAG, "Error showing security status dialog", e);
+            Toast.makeText(this, "TESLA Auth Active: Key Index " +
+                    teslaKeyChain.getCurrentIndex(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void checkAndSetupEmergencyContacts() {
@@ -235,18 +398,6 @@ public class MainActivity extends AppCompatActivity {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, PERMISSIONS_REQUEST_CODE);
         }
     }
-//    private String getGPSCoordinates() {
-//        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-//            LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-//            if (locationManager != null) {
-//                Location location = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-//                if (location != null) {
-//                    return String.format("Lat: %s, Long: %s", location.getLatitude(), location.getLongitude());
-//                }
-//            }
-//        }
-//        return "Location Unavailable";
-//    }
 
     private void saveMessage(String message) {
         SharedPreferences prefs = getSharedPreferences("ChatHistory", MODE_PRIVATE);
@@ -347,7 +498,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void sendSOSMessage() {
-
         if (emergencyContacts.size() < 2) {
             showEmergencyContactsDialog();
             return;
@@ -362,6 +512,7 @@ public class MainActivity extends AppCompatActivity {
                 Build.MANUFACTURER, Build.MODEL, batteryPercentage, gpsCoordinates
         );
 
+        // Send SMS to emergency contacts
         for (String contact : emergencyContacts) {
             sendSMS(contact, emergencyMessage);
         }
@@ -374,7 +525,7 @@ public class MainActivity extends AppCompatActivity {
         sendSMS(emergencyNumber, emergencyMessage); // Primary emergency contact
         sendSMS("+919503260577", emergencyMessage); // Personal emergency contact
 
-        // Also send via mesh network (existing functionality)
+        // Also send via mesh network with security
         broadcastMessage(emergencyMessage);
 
         Toast.makeText(this, "SOS sent via SMS & Mesh Network!", Toast.LENGTH_SHORT).show();
@@ -392,15 +543,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-
-
     private void initializeUIComponents() {
         // Ensure ALL UI components are initialized
         messageInput = findViewById(R.id.messageInput);
 //        messageView = findViewById(R.id.messageView); // Keep this if you still want it
         sendButton = findViewById(R.id.sendButton);
         statusText = findViewById(R.id.statusText);
-        deviceCountText = findViewById(R.id.deviceCountText);
+//        deviceCountText = findViewById(R.id.deviceCountText);
+        Button securityButton = findViewById(R.id.securityButton);
+
 
         // Initialize RecyclerView
         messageRecyclerView = findViewById(R.id.messageRecyclerView);
@@ -526,54 +677,60 @@ public class MainActivity extends AppCompatActivity {
         saveMessage(message);
         executorService.execute(() -> {
             try {
-                // Use local username or default
+                // Get local info
                 String senderName = TextUtils.isEmpty(localUsername)
                         ? "User-" + DEVICE_ID.substring(0, 8)
                         : localUsername;
-
-                // Get device MAC safely
-                String macAddress = "Unknown";
-                try {
-                    WifiManager wifiManager = (WifiManager) getApplicationContext()
-                            .getSystemService(Context.WIFI_SERVICE);
-                    if (wifiManager != null) {
-                        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
-                        macAddress = wifiInfo != null ? wifiInfo.getMacAddress() : "Unknown";
-                    }
-                } catch (Exception e) {
-                    Log.e("MainActivity", "Failed to get MAC address", e);
-                }
-
-                // Create message with safe values
                 String messageId = UUID.randomUUID().toString();
                 String localIP = getLocalIpAddress();
-                Message msgObj = new Message(
+
+                // Create secure message with TESLA and hop-count protection
+                Message secureMsg = secureMessageManager.createSecureMessage(
+                        DEVICE_ID,
                         senderName,
-                        macAddress,
-                        localIP != null ? localIP : "Unknown",
                         message,
+                        localIP != null ? localIP : "Unknown",
                         messageId
                 );
 
-                // Safely update UI on main thread
+                // Add to UI
+                mainHandler.post(() -> {
+                    if (messageAdapter != null) {
+                        messageAdapter.addMessage(secureMsg);
+                    }
+                });
+
+                // Broadcast secure message
+                broadcastSecureMessage(secureMsg);
+
+                // Schedule acknowledgment timeout
+                scheduleAcknowledgmentTimeout(messageId);
+
+            } catch (Exception e) {
+                Log.e(TAG, "Broadcast message failed", e);
                 if (mainHandler != null) {
                     mainHandler.post(() -> {
-                        if (messageAdapter != null) {
-                            messageAdapter.addMessage(msgObj);
-                        }
+                        Toast.makeText(MainActivity.this,
+                                "Failed to broadcast message",
+                                Toast.LENGTH_SHORT).show();
                     });
                 }
+            }
+        });
+    }
 
-                // Construct mesh message
-                String meshMessage = constructMeshMessage(messageId, message);
-                // Construct mesh message
+    private void broadcastSecureMessage(Message secureMsg) {
+        executorService.execute(() -> {
+            try {
+                // Serialize message for transmission
+                String serializedMessage = SecureMessageManager.serializeMessage(secureMsg);
 
                 // Create UDP broadcast socket
                 DatagramSocket socket = new DatagramSocket();
                 socket.setBroadcast(true);
 
                 // Prepare message data
-                byte[] sendData = meshMessage.getBytes();
+                byte[] sendData = serializedMessage.getBytes();
 
                 // Get network interface details
                 List<InetAddress> broadcastAddresses = getBroadcastAddresses();
@@ -596,18 +753,9 @@ public class MainActivity extends AppCompatActivity {
 
                 socket.close();
 
-                // Start acknowledgment timeout
-                scheduleAcknowledgmentTimeout(messageId);
-
-            } catch (SocketException e) {
-                Log.e("MainActivity", "Broadcast message failed", e);
-                // Safely show toast on main thread
-                if (mainHandler != null)
-                    mainHandler.post(() -> {
-                        Toast.makeText(MainActivity.this,
-                                "Failed to broadcast message",
-                                Toast.LENGTH_SHORT).show();
-                    });
+                Log.d(TAG, "Broadcasted secure message: " + secureMsg.getContent());
+            } catch (Exception e) {
+                Log.e(TAG, "Error broadcasting secure message", e);
             }
         });
     }
@@ -660,7 +808,7 @@ public class MainActivity extends AppCompatActivity {
                 DatagramSocket socket = new DatagramSocket(BROADCAST_PORT);
                 socket.setBroadcast(true);
 
-                byte[] receiveBuffer = new byte[1024];
+                byte[] receiveBuffer = new byte[2048]; // Increased buffer size for secure messages
 
                 while (isReceiving) {
                     // Prepare packet to receive data
@@ -679,8 +827,8 @@ public class MainActivity extends AppCompatActivity {
                             receivePacket.getLength()
                     );
 
-                    // Process the received mesh message
-                    processReceivedMessage(receivedMessage,
+                    // Process the received secure message
+                    processReceivedSecureMessage(receivedMessage,
                             receivePacket.getAddress().getHostAddress());
                 }
 
@@ -696,6 +844,186 @@ public class MainActivity extends AppCompatActivity {
             }
         });
     }
+
+    // Modify the processReceivedSecureMessage method
+    private void processReceivedSecureMessage(String receivedMessage, String senderIP) {
+        try {
+            // Deserialize the message
+            Message secureMsg = SecureMessageManager.deserializeMessage(receivedMessage);
+
+            if (secureMsg == null) {
+                Log.w(TAG, "Failed to deserialize message");
+                return;
+            }
+
+            String messageId = secureMsg.getMessageId();
+            String originDeviceId = secureMsg.getOriginDeviceId();
+
+            // Track connected device
+            connectedDevices.add(originDeviceId);
+
+            // Check if we've already seen this message
+            if (seenMessageIds.contains(messageId)) {
+                return; // Prevent duplicate processing
+            }
+
+            // Update last seen time for the device
+            deviceLastSeenTime.put(originDeviceId, System.currentTimeMillis());
+
+            // Add message to seen list
+            seenMessageIds.add(messageId);
+
+            // Check if it's a key disclosure message
+            if (secureMsg.isKeyDisclosure()) {
+                processKeyDisclosure(secureMsg);
+
+                // Also forward key disclosures to propagate them through the network
+                if (!originDeviceId.equals(DEVICE_ID)) {
+                    broadcastSecureMessage(secureMsg);
+                }
+                return;
+            }
+
+            // Verify hop count integrity
+            if (!secureMessageManager.verifyHopCount(secureMsg)) {
+                Log.w(TAG, "Hop count verification failed for message: " + messageId);
+                return;
+            }
+
+            // If not from this device, process and potentially rebroadcast
+            if (!originDeviceId.equals(DEVICE_ID)) {
+                // Try to verify with already disclosed keys first
+                boolean verified = secureMessageManager.verifyWithStoredKeys(secureMsg);
+
+                if (verified) {
+                    secureMsg.setAuthenticated(true);
+                } else {
+                    // Buffer message for TESLA verification
+                    secureMessageManager.bufferMessage(secureMsg);
+
+                    // Add message to pending verification
+                    pendingVerification.put(messageId, secureMsg);
+                }
+
+                // Display received message on UI thread
+                mainHandler.post(() -> {
+                    secureMsg.setDelivered(true);
+                    messageAdapter.addMessage(secureMsg);
+                });
+
+                // Always rebroadcast message with updated hop count (if within limits)
+                // This ensures it reaches all nodes in the network
+                if (secureMsg.getHopCount() < MAX_HOP_COUNT) {
+                    rebroadcastSecureMessage(secureMsg);
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error processing received message", e);
+        }
+    }
+
+    private void processKeyDisclosure(Message keyDisclosureMsg) {
+        try {
+            int keyIndex = keyDisclosureMsg.getTeslaKeyIndex();
+            byte[] disclosedKey = keyDisclosureMsg.getDisclosedKey();
+
+            if (keyIndex < 0 || disclosedKey == null) {
+                Log.w(TAG, "Invalid key disclosure message");
+                return;
+            }
+
+            // Log the key disclosure reception
+            String keyPrefix = SecureMessageManager.byteArrayToHex(disclosedKey).substring(0, 8);
+            securityLog.logKeyDisclosure(keyIndex, keyPrefix);
+
+            Log.d(TAG, "Processing key disclosure for index: " + keyIndex);
+
+            // Process buffered messages with the disclosed key
+            Map<String, Boolean> verificationResults =
+                    secureMessageManager.processKeyDisclosure(keyIndex, disclosedKey);
+
+            // Update message status in UI
+            mainHandler.post(() -> {
+                for (Map.Entry<String, Boolean> result : verificationResults.entrySet()) {
+                    String msgId = result.getKey();
+                    boolean verified = result.getValue();
+
+                    // Log verification result
+                    securityLog.logVerification(msgId, verified);
+
+                    messageAdapter.updateMessageAuthenticationStatus(msgId, verified);
+
+                    // Remove from pending verification
+                    pendingVerification.remove(msgId);
+                }
+            });
+
+            // Add to processKeyDisclosure method in MainActivity.java
+// After processing verification results
+            if (!verificationResults.isEmpty()) {
+                // Show notification if messages were verified
+                String message = verificationResults.size() + " message(s) authenticated!";
+                Snackbar.make(findViewById(android.R.id.content), message, Snackbar.LENGTH_SHORT)
+                        .setBackgroundTint(getResources().getColor(R.color.md_theme_primary))
+                        .setTextColor(Color.WHITE)
+                        .show();
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error processing key disclosure", e);
+        }
+    }
+
+    // In MainActivity.java, modify the rebroadcastSecureMessage method
+    public void rebroadcastSecureMessage(Message secureMsg) {
+        try {
+            int oldHopCount = secureMsg.getHopCount();
+
+            // Only rebroadcast if within hop limit
+            if (oldHopCount >= MAX_HOP_COUNT) {
+                Log.d(TAG, "Max hop count reached, not rebroadcasting");
+                return;
+            }
+
+            // Process message for forwarding
+            Message forwardedMsg = secureMessageManager.processForForwarding(secureMsg);
+
+            // Add short random delay to prevent network congestion
+            int randomDelay = new Random().nextInt(500); // 0-500ms
+
+            // Use Handler for delay
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                // Broadcast the forwarded message
+                broadcastSecureMessage(forwardedMsg);
+
+                Log.d(TAG, "Rebroadcast message with hop count: " + forwardedMsg.getHopCount() +
+                        " (previous: " + oldHopCount + ")");
+
+                // Log forwarding
+                securityLog.logHopCountUpdate(
+                        secureMsg.getMessageId(), oldHopCount, forwardedMsg.getHopCount());
+
+            }, randomDelay);
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error rebroadcasting message", e);
+        }
+    }
+//    private void rebroadcastSecureMessage(Message secureMsg) {
+//        try {
+//            int oldHopCount = secureMsg.getHopCount();
+//            Message forwardedMsg = secureMessageManager.processForForwarding(secureMsg);
+//
+//            // Log hop count update
+//            securityLog.logHopCountUpdate(
+//                    secureMsg.getMessageId(), oldHopCount, forwardedMsg.getHopCount());
+//
+//            broadcastSecureMessage(forwardedMsg);
+//            Log.d(TAG, "Rebroadcast message, hop count: " + forwardedMsg.getHopCount());
+//        } catch (Exception e) {
+//            Log.e(TAG, "Error rebroadcasting message", e);
+//        }
+//    }
 
     private String constructMeshMessage(String messageId, String message) {
         // Format: messageId|originDeviceId|hopCount|senderUsername|message
@@ -751,106 +1079,11 @@ public class MainActivity extends AppCompatActivity {
                             // Clear connected devices
                             connectedDevices.clear();
                             deviceLastSeenTime.clear();
-                            updateDeviceCount();
                         }
                     });
                 }
             }
         }
-    }
-
-    private void processReceivedMessage(String receivedMessage, String senderIP) {
-        String[] parts = receivedMessage.split("\\|");
-        if (parts.length != 5) return;
-
-        String messageId = parts[0];
-        String originDeviceId = parts[1];
-        int hopCount = Integer.parseInt(parts[2]);
-        String senderUsername = parts[3];
-        String message = parts[4];
-
-        // Track connected device
-        connectedDevices.add(originDeviceId);
-        updateDeviceCount();
-
-        // Check if we've already seen this message
-        if (seenMessageIds.contains(messageId)) {
-            return; // Prevent duplicate processing
-        }
-
-        // Update last seen time for the device
-        deviceLastSeenTime.put(originDeviceId, System.currentTimeMillis());
-
-        // Add message to seen list
-        seenMessageIds.add(messageId);
-
-        // Check hop count to prevent infinite routing
-        if (hopCount >= MAX_HOP_COUNT) {
-            return;
-        }
-
-        // If not from this device, process and potentially rebroadcast
-        if (!originDeviceId.equals(DEVICE_ID)) {
-            sendAcknowledgment(messageId, originDeviceId);
-
-            // Display received message on UI thread
-            mainHandler.post(() -> {
-                Message msgObj = new Message(
-                        senderUsername,  // Use actual sender username
-                        "Unknown",
-                        senderIP,
-                        message,
-                        messageId
-                );
-                msgObj.setDelivered(true);
-                messageAdapter.addMessage(msgObj);
-            });
-
-            // Enhanced routing: Rebroadcast with incremented hop count
-            rebroadcastMessage(messageId, originDeviceId, hopCount, senderUsername, message);
-        }
-    }
-
-    private void rebroadcastMessage(String messageId, String originDeviceId, int hopCount, String senderUsername, String message) {
-        executorService.execute(() -> {
-            try {
-                // Increment hop count
-                int newHopCount = hopCount + 1;
-                String forwardMessage = String.format("%s|%s|%d|%s|%s",
-                        messageId, originDeviceId, newHopCount, senderUsername, message);
-
-                // Create UDP broadcast socket
-                DatagramSocket socket = new DatagramSocket();
-                socket.setBroadcast(true);
-
-                // Prepare message data
-                byte[] sendData = forwardMessage.getBytes();
-
-                // Get network interface details
-                List<InetAddress> broadcastAddresses = getBroadcastAddresses();
-
-                // Send to all potential broadcast addresses
-                for (InetAddress broadcastAddress : broadcastAddresses) {
-                    try {
-                        DatagramPacket sendPacket = new DatagramPacket(
-                                sendData,
-                                sendData.length,
-                                broadcastAddress,
-                                BROADCAST_PORT
-                        );
-
-                        socket.send(sendPacket);
-                        Log.d("Mesh Network", "Rebroadcast sent to: " + broadcastAddress.getHostAddress());
-                    } catch (IOException e) {
-                        Log.e("Mesh Network", "Rebroadcast failed to " + broadcastAddress.getHostAddress(), e);
-                    }
-                }
-
-                socket.close();
-            } catch (Exception e) {
-                Log.e("Mesh Network", "Rebroadcast error", e);
-            }
-        });
     }
 
     // Remove disconnected devices periodically
@@ -868,7 +1101,6 @@ public class MainActivity extends AppCompatActivity {
                     // Remove from connected devices
                     connectedDevices.retainAll(deviceLastSeenTime.keySet());
 
-                    updateDeviceCount();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
@@ -885,12 +1117,6 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
                 e.printStackTrace();
             }
-        });
-    }
-
-    private void updateDeviceCount() {
-        mainHandler.post(() -> {
-            deviceCountText.setText("Devices: " + connectedDevices.size());
         });
     }
 
@@ -938,7 +1164,14 @@ public class MainActivity extends AppCompatActivity {
         }
         // Stop receiving messages
         isReceiving = false;
-        // Shutdown executor service
-        executorService.shutdown();
+
+        // Shutdown executors
+        if (executorService != null) {
+            executorService.shutdown();
+        }
+
+        if (scheduledExecutor != null) {
+            scheduledExecutor.shutdown();
+        }
     }
 }

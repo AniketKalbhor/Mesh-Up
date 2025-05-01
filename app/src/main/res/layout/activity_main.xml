@@ -26,21 +26,23 @@
             android:orientation="horizontal"
             android:padding="16dp">
 
+
             <TextView
                 android:id="@+id/statusText"
-                android:layout_width="0dp"
+                android:layout_width="129dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="Network Status: Not Connected"
                 android:textAppearance="?attr/textAppearanceBodyMedium" />
 
-            <TextView
-                android:id="@+id/deviceCountText"
+            <Button
+                android:id="@+id/securityButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Devices: 0"
-                android:textAppearance="?attr/textAppearanceBodyMedium"
-                android:textColor="?attr/colorPrimary" />
+                android:layout_below="@id/sosButton"
+                android:layout_alignParentEnd="true"
+                android:text="Security Log" />
+
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
@@ -88,7 +90,7 @@
             app:cornerRadius="8dp"
             app:layout_constraintBottom_toTopOf="@+id/messageInputLayout"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintHorizontal_bias="0.568"
+            app:layout_constraintHorizontal_bias="0.497"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintVertical_bias="1.0" />
@@ -121,6 +123,7 @@
             app:cornerRadius="8dp"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
+
     </androidx.constraintlayout.widget.ConstraintLayout>
     </com.google.android.material.card.MaterialCardView>
 
